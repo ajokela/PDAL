@@ -61,9 +61,12 @@ public:
 
 private:
     double m_radius;
+    std::string m_dimName;
+    Dimension::Id m_dimId;
 
     virtual void addDimensions(PointLayoutPtr layout);
     virtual void addArgs(ProgramArgs& args);
+    virtual void prepared(PointTableRef table);
     virtual PointViewSet run(PointViewPtr view);
 };
 

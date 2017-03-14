@@ -37,6 +37,7 @@
 #include <pdal/KDIndex.hpp>
 #include <pdal/util/Utils.hpp>
 #include <pdal/pdal_macros.hpp>
+#include <pdal/PointViewIter.hpp>
 #include <pdal/util/ProgramArgs.hpp>
 
 #include <string>
@@ -59,6 +60,7 @@ std::string SampleFilter::getName() const
 
 void SampleFilter::addArgs(ProgramArgs& args)
 {
+    args.add("dimension", "Dimension on which to thin", m_dimName);
     args.add("radius", "Radius", m_radius, 1.0);
 }
 
@@ -66,6 +68,13 @@ void SampleFilter::addArgs(ProgramArgs& args)
 void SampleFilter::addDimensions(PointLayoutPtr layout)
 {
     layout->registerDim(Dimension::Id::Classification);
+}
+
+
+void SampleFilter::prepared(PointTableRef table)
+{
+    PointLayoutPtr layout(table.layout());
+    m_dimId = layout->findDim(m_dimName);
 }
 
 
@@ -79,37 +88,62 @@ PointViewSet SampleFilter::run(PointViewPtr inView)
     if (!np)
         return viewSet;
     PointViewPtr outView = inView->makeNew();
-
-    // Build the 3D KD-tree.
-    KD3Index index(*inView);
-    index.build();
-
-    // The result looks much better if we take some time to shuffle the indices.
-    std::srand(std::time(NULL));
-    std::vector<PointId> indices(np);
-    for (PointId i = 0; i < np; ++i)
-        indices[i] = i;
-    std::random_shuffle(indices.begin(), indices.end());
-
-    // All points are marked as kept (1) by default. As they are masked by
-    // neighbors within the user-specified radius, their value is changed to 0.
-    std::vector<int> keep(np, 1);
-
-    // We are able to subsample in a single pass over the shuffled indices.
-    for (auto const& i : indices)
+    
+    if (m_dimId == Dimension::Id::Unknown)
     {
-        // If a point is masked, it is forever masked, and cannot be part of the
-        // sampled cloud. Otherwise, the current index is appended to the output
-        // PointView.
-        if (keep[i] == 0)
-            continue;
-        outView->appendPoint(*inView, i);
+        // Build the 3D KD-tree.
+        KD3Index index(*inView);
+        index.build();
 
-        // We now proceed to mask all neighbors within m_radius of the kept
-        // point.
-        auto ids = index.radius(i, m_radius);
-        for (PointId j = 1; j < ids.size(); ++j)
-            keep[ids[j]] = 0;
+        // The result looks much better if we take some time to shuffle the
+        // indices.
+        std::srand(std::time(NULL));
+        std::vector<PointId> indices(np);
+        for (PointId i = 0; i < np; ++i)
+            indices[i] = i;
+        std::random_shuffle(indices.begin(), indices.end());
+
+        // All points are marked as kept (1) by default. As they are masked by
+        // neighbors within the user-specified radius, their value is changed to
+        // 0.
+        std::vector<int> keep(np, 1);
+
+        // We are able to subsample in a single pass over the shuffled indices.
+        for (auto const& i : indices)
+        {
+            // If a point is masked, it is forever masked, and cannot be part of
+            // the sampled cloud. Otherwise, the current index is appended to
+            // the output PointView.
+            if (keep[i] == 0)
+                continue;
+            outView->appendPoint(*inView, i);
+
+            // We now proceed to mask all neighbors within m_radius of the kept
+            // point.
+            auto ids = index.radius(i, m_radius);
+            for (PointId j = 1; j < ids.size(); ++j)
+                keep[ids[j]] = 0;
+        }
+    }
+    else
+    {
+        auto cmp = [this](const PointIdxRef& p1, const PointIdxRef& p2)
+            { return p1.compare(m_dimId, p2); };
+
+        std::sort(inView->begin(), inView->end(), cmp);
+        
+        // keep first point, and then the next one that is at least radius away
+        outView->appendPoint(*inView, 0);
+        double prev = inView->getFieldAs<double>(m_dimId, 0);
+        for (PointId i = 1; i < inView->size(); ++i)
+        {
+            double val = inView->getFieldAs<double>(m_dimId, i);
+            if ((val - prev) > m_radius)
+            {
+                outView->appendPoint(*inView, i);
+                prev = val;
+            }
+        }
     }
 
     // Simply calculate the percentage of retained points.
